@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zephyr-tools"
+version = "0.2.0"
+description = "Unified tooling for Zephyr based embedded projects (CLI, TUI, Desktop, Web)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Zephyr Tools Team"},
+]
+keywords = ["zephyr", "embedded", "cli", "west", "rtos"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Embedded Systems",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["openai>=1.0"]
+dev = [
+    "python-dotenv>=1.0",
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "textual>=0.50",
+    "ruff>=0.4",
+    "mypy>=1.0",
+]
+all = ["zephyr-tools[llm,dev]"]
+
+[project.scripts]
+zt = "zephyr_tools.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/overrize/zephyr_tools"
+Issues = "https://github.com/overrize/zephyr_tools/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zephyr_tools*"]
+exclude = ["tests*", "apps*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

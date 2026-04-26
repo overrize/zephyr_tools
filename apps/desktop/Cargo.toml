@@ -1,0 +1,20 @@
+[package]
+name = "zephyr-tools-desktop"
+version = "0.2.0"
+description = "Zephyr Tools Desktop"
+authors = ["Zephyr Tools Team"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.70"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

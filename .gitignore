@@ -32,6 +32,15 @@ env/
 *.swp
 *.swo
 
+# Web
+apps/web/node_modules/
+apps/web/dist/
+
+# Desktop (Tauri / Rust)
+apps/desktop/target/
+apps/desktop/Cargo.lock
+apps/desktop/.tauri/
+
 # OS
 .DS_Store
 Thumbs.db
