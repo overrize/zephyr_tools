@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ScriptsDir = Join-Path $env:APPDATA "Python\Python$((python --version 2>&1) -replace 'Python ', '' -replace '\..*', '')\Scripts"
+$ScriptsDir = python -c "import site, os; print(os.path.abspath(os.path.join(site.getusersitepackages(), '..', 'Scripts')))"
 
 Write-Host "Installing zephyr-tools in editable mode..." -ForegroundColor Cyan
 & pip install -e "$RepoRoot"
@@ -12,6 +12,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $CurrentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+
+# Remove stale/incorrect Python3 Scripts entries and add the correct one
+$BadEntry = Join-Path $env:APPDATA "Python\Python3\Scripts"
+if ($CurrentPath -like "*$BadEntry*") {
+    Write-Host "Removing stale PATH entry..." -ForegroundColor Yellow
+    $CurrentPath = ($CurrentPath -split ';' | Where-Object { $_ -ne $BadEntry }) -join ';'
+}
+
 if ($CurrentPath -notlike "*$ScriptsDir*") {
     Write-Host "Adding Python user Scripts directory to PATH..." -ForegroundColor Cyan
     [Environment]::SetEnvironmentVariable("Path", "$CurrentPath;$ScriptsDir", "User")
