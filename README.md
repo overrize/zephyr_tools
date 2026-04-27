@@ -15,16 +15,43 @@ All heavy logic (workspace, project, build, flash, monitor, doctor, codegen) liv
 
 ## Install
 
+### macOS / Linux
+
 ```bash
 git clone git@github.com:overrize/zephyr_tools.git
 cd zephyr_tools
-pip install -e .
+pip install -e ".[llm]"
+zt --version
 ```
 
-For LLM features (gen/fix), also install:
+### Windows
 
-```bash
+If `zt` is not recognized after `pip install`, the Python user `Scripts` folder is not on your `PATH`.
+
+Use the provided install script (it installs the package and adds the Scripts directory to your user PATH automatically):
+
+```powershell
+git clone git@github.com:overrize/zephyr_tools.git
+cd zephyr_tools
+.\install.ps1
+```
+
+Then **restart your terminal** and run:
+
+```powershell
+zt --version
+```
+
+If you prefer manual installation:
+
+```powershell
 pip install -e ".[llm]"
+```
+
+If `zt` is still not found, add this directory to your user `PATH` manually (replace `3xx` with your Python version):
+
+```
+%APPDATA%\Python\Python3xx\Scripts
 ```
 
 ## CLI (`zt`)
