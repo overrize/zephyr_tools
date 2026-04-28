@@ -14,6 +14,9 @@ from rich import box
 from .client import ZephyrToolsClient
 from .errors import ZephyrToolsError
 from .llm.config import get_llm_config
+from . import session_store
+from . import workspace
+from .skills import load_skills
 
 console = Console()
 
@@ -187,15 +190,20 @@ TOOL_DEFINITIONS = [
 
 
 class ZephyrRepl:
-    def __init__(self, work_dir: str | Path | None = None, default_board: str = "nucleo_f411re"):
+    def __init__(self, work_dir: str | Path | None = None, default_board: str = "nucleo_f411re", resume_session_id: str | None = None):
         self.client = ZephyrToolsClient(work_dir=work_dir, default_board=default_board)
         self.messages: list[dict] = []
         self.ctx_project: str | None = None
         self.ctx_board: str = default_board
         self.ctx_build_dir: str = "build"
+        self._session: session_store.ZephyrSession | None = None
+        self._resume_id = resume_session_id
 
     def run(self):
-        self._banner()
+        ws_path = workspace.prompt_workspace()
+        if str(ws_path) != str(self.client.work_dir):
+            self.client = ZephyrToolsClient(work_dir=ws_path, default_board=self.ctx_board)
+        self._try_resume_or_new()
         api_key, base_url, model = self._resolve_api()
         if not api_key:
             return
@@ -205,29 +213,45 @@ class ZephyrRepl:
         self.llm = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.messages.append({"role": "system", "content": SYSTEM_PROMPT})
-        self.messages.append({
-            "role": "system",
-            "content": f"Work directory: {self.client.work_dir}\nDefault board: {self.ctx_board}",
-        })
+        ws_desc = workspace.describe_workspace(ws_path)
+        context_blocks = [ws_desc, f"Default board: {self.ctx_board}"]
+        loaded = load_skills(ws_path)
+        if loaded:
+            skill_summary = "Available skills:\n" + "\n".join(
+                f"- {s['name']}" for s in loaded
+            )
+            context_blocks.append(skill_summary)
+        self.messages.append({"role": "system", "content": "\n".join(context_blocks)})
         try:
             while True:
                 try:
                     text = input("\nzt> ").strip()
                 except (EOFError, KeyboardInterrupt):
-                    console.print("\n[yellow]Goodbye.[/yellow]")
+                    self._save_and_exit()
                     break
                 if not text:
                     continue
                 if text.lower() in ("quit", "exit"):
-                    console.print("[yellow]Goodbye.[/yellow]")
+                    self._save_and_exit()
                     break
                 if text.lower() == "clear":
                     console.clear()
                     continue
+                if text.lower() == "/resume":
+                    self._list_and_resume()
+                    continue
+                if text.lower() == "/sessions":
+                    self._list_sessions()
+                    continue
+                if text.lower() == "/new":
+                    self._start_new_session()
+                    continue
                 self.messages.append({"role": "user", "content": text})
                 self._process_turn()
+                self._auto_save()
         except Exception as e:
             console.print(f"\n[red]Fatal: {e}[/red]")
+            self._auto_save()
 
     def _resolve_api(self) -> tuple[str | None, str | None, str]:
         api_key, base_url, model = get_llm_config(self.client.work_dir)
@@ -455,7 +479,105 @@ class ZephyrRepl:
             output = f"EXIT CODE: {result.returncode}\n{output}"
         return output[:2000]
 
-    def _banner(self):
+    def _try_resume_or_new(self):
+        sessions = session_store.list_sessions()
+        if self._resume_id:
+            sess = session_store.load_session(self._resume_id)
+            if sess:
+                self._restore_session(sess)
+                self._banner(resumed=True)
+                m = f"[dim]Resumed session {sess.session_id} ({sess.message_count} messages)[/dim]"
+                console.print(m)
+                return
+        if sessions and not self._resume_id:
+            self._banner()
+            self._prompt_resume(sessions)
+        else:
+            self._banner()
+
+    def _prompt_resume(self, sessions: list[dict]):
+        from datetime import datetime
+
+        console.print("\n[dim]Previous sessions:[/dim]")
+        for i, s in enumerate(sessions[:5]):
+            dt = datetime.fromtimestamp(s["updated"]).strftime("%m-%d %H:%M")
+            m = f"  [cyan]{i+1}.[/cyan]  {dt}  {s['work_dir']}  ({s['messages']} msgs)"
+            console.print(m)
+        console.print("  [cyan]n.[/cyan]  Start fresh")
+        try:
+            choice = input("Resume? (1/2/... or Enter for fresh): ").strip()
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < min(len(sessions), 5):
+                    sess = session_store.load_session(sessions[idx]["id"])
+                    if sess:
+                        self._restore_session(sess)
+                        console.print(f"[green]Resumed session {sess.session_id}[/green]")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    def _restore_session(self, sess: session_store.ZephyrSession):
+        self.messages = list(sess.messages)
+        self.ctx_project = sess.project
+        self.ctx_board = sess.board
+        self.ctx_build_dir = sess.build_dir
+        self.client.default_board = sess.board
+        self.client.work_dir = Path(sess.work_dir)
+        self._session = sess
+
+    def _save_and_exit(self):
+        self._auto_save()
+        sid = self._session.session_id if self._session else "unknown"
+        console.print(f"\n[yellow]Session saved.[/yellow] [dim]Resume: zt repl --resume {sid}[/dim]")
+        console.print("[yellow]Goodbye.[/yellow]")
+
+    def _auto_save(self):
+        if self._session is None:
+            self._session = session_store.ZephyrSession.new(
+                work_dir=str(self.client.work_dir), board=self.ctx_board,
+            )
+        self._session.messages = list(self.messages)
+        self._session.project = self.ctx_project
+        self._session.board = self.ctx_board
+        self._session.build_dir = self.ctx_build_dir
+        session_store.save_session(self._session)
+
+    def _list_sessions(self):
+        sessions = session_store.list_sessions()
+        if not sessions:
+            console.print("[dim]No saved sessions.[/dim]")
+            return
+        from datetime import datetime
+        for s in sessions:
+            dt = datetime.fromtimestamp(s["updated"]).strftime("%m-%d %H:%M")
+            console.print(f"  [cyan]{s['id']}[/cyan]  {dt}  {s['work_dir']}  ({s['messages']} msgs)")
+
+    def _list_and_resume(self):
+        self._list_sessions()
+        sid = input("Session ID: ").strip()
+        if sid:
+            sess = session_store.load_session(sid)
+            if sess:
+                self._restore_session(sess)
+                m = f"[green]Resumed session {sid} ({len(sess.messages)} messages)[/green]"
+                console.print(m)
+            else:
+                console.print(f"[red]Session not found: {sid}[/red]")
+
+    def _start_new_session(self):
+        self._auto_save()
+        old_id = self._session.session_id if self._session else None
+        self.messages = []
+        self._session = session_store.ZephyrSession.new(
+            work_dir=str(self.client.work_dir), board=self.ctx_board,
+        )
+        self.messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        self.messages.append({
+            "role": "system", "content": workspace.describe_workspace(self.client.work_dir),
+        })
+        console.print(f"[green]New session. Old saved as {old_id}[/green]")
+
+    def _banner(self, resumed: bool = False):
         from . import __version__
         console.print(Panel(
             Text.from_markup(
@@ -477,9 +599,6 @@ def _clean_json(text: str) -> str:
     return text.strip()
 
 
-def run_repl(work_dir: str | Path | None = None, default_board: str = "nucleo_f411re") -> int:
-    ZephyrRepl(work_dir=work_dir, default_board=default_board).run()
-    return 0
-def run_repl(work_dir: str | Path | None = None, default_board: str = "nucleo_f411re") -> int:
-    ZephyrRepl(work_dir=work_dir, default_board=default_board).run()
+def run_repl(work_dir: str | Path | None = None, default_board: str = "nucleo_f411re", resume_session_id: str | None = None) -> int:
+    ZephyrRepl(work_dir=work_dir, default_board=default_board, resume_session_id=resume_session_id).run()
     return 0
