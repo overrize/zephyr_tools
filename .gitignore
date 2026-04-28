@@ -41,6 +41,9 @@ apps/desktop/target/
 apps/desktop/Cargo.lock
 apps/desktop/.tauri/
 
+# Environment
+.env
+
 # OS
 .DS_Store
 Thumbs.db
