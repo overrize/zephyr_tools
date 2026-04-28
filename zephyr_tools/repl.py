@@ -1,436 +1,440 @@
-"""Zephyr Tools interactive REPL -- Claude Code-style conversational CLI."""
+"""Zephyr Tools conversational REPL -- Claude Code style agent loop."""
 
 from __future__ import annotations
 
-import re
-import shlex
+import json
 from pathlib import Path
-
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.styles import Style
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 from rich import box
 
 from .client import ZephyrToolsClient
 from .errors import ZephyrToolsError
-from .llm.codegen import SYSTEM_PROMPT
+from .llm.config import get_llm_config
 
-HISTORY_FILE = Path.home() / ".zephyr_tools_history"
-
-style = Style.from_dict({"prompt": "bold cyan"})
 console = Console()
 
-
-def _ok(text: str):
-    console.print(f"[green]Y[/green] {text}")
-
-
-def _fail(text: str):
-    console.print(f"[red]X[/red] {text}")
+try:
+    from openai import OpenAI, APIError
+except ImportError:
+    OpenAI = None
+    APIError = Exception
 
 
-def _info(text: str):
-    console.print(f"[dim]{text}[/dim]")
+SYSTEM_PROMPT = """You are an embedded development assistant for Zephyr RTOS. You help users build, flash, and debug embedded firmware.
 
+You have tools for environment checks, board listing, project creation, building, flashing, monitoring, and file editing.
 
-ZEPHYR_COMMANDS: dict[str, tuple[str, str]] = {
-    "doctor": ("Environment check", "Check Zephyr dev environment (west, cmake, ninja, python, probe)"),
-    "init": ("Initialize workspace", "Init west workspace with --manifest-url URL --update"),
-    "boards": ("List boards", "List Zephyr boards [filter]"),
-    "board": ("Set default board", "board <name> -- set current target board"),
-    "create": ("Create project", "create <name> [--board B] [--output DIR] -- create Zephyr app"),
-    "select": ("Switch context", "select <path> -- set current project path"),
-    "build": ("Build project", "build [--board B] [--pristine] [--build-dir DIR] -- build project"),
-    "flash": ("Flash firmware", "flash [--runner R] [--build-dir DIR] -- flash to device"),
-    "monitor": ("Monitor logs", "monitor [--build-dir DIR] -- connect serial/RTT log"),
-    "gen": ("AI generate code", 'gen "<prompt>" [--board B] [--output DIR] -- LLM generate Zephyr app'),
-    "fix": ("AI fix errors", 'fix <project> "<prompt>" --error-file FILE -- LLM fix build errors'),
-    "ask": ("AI Q&A", 'ask "<question>" -- ask Zephyr questions to LLM'),
-    "status": ("Show context", "Show session context (project, board, build dir)"),
-    "clear": ("Clear screen", "Clear terminal screen"),
-    "help": ("Help", "Show command list"),
-    "quit": ("Quit", "Exit REPL"),
-    "exit": ("Exit", "Exit REPL"),
-}
+RULES:
+1. Always run doctor first if you are unsure about toolchain state.
+2. Use create_project to scaffold a Zephyr app. Default board: nucleo_f411re.
+3. Use the current project context for builds unless the user specifies otherwise.
+4. Explain what you are doing in simple terms.
+5. If a tool fails, explain the error and suggest fixes.
+6. Keep responses concise.
+7. Context is maintained between turns (project, board, build dir).
+"""
 
-NL_ROUTES: dict[str, str] = {
-    "check": "doctor", "environment": "doctor", "env": "doctor", "diagnose": "doctor",
-    "list": "boards", "search": "boards",
-    "new": "create", "make": "create",
-    "generate": "gen",
-    "fix": "fix", "repair": "fix", "debug": "fix",
-    "compile": "build", "make": "build",
-    "burn": "flash", "write": "flash", "upload": "flash", "program": "flash", "deploy": "flash",
-    "log": "monitor", "serial": "monitor", "console": "monitor",
-    "help": "help", "what": "help", "commands": "help",
-    "status": "status", "context": "status", "info": "status", "project": "status",
-}
-
-
-class ZephyrCompleter(Completer):
-    def __init__(self, commands: dict[str, tuple[str, str]]):
-        self.commands = commands
-
-    def get_completions(self, document, complete_event):
-        text = document.text_before_cursor.lstrip()
-        if not text:
-            for cmd in sorted(self.commands):
-                yield Completion(cmd + " ", start_position=0, display=cmd, display_meta=self.commands[cmd][0])
-            return
-        parts = text.split()
-        if len(parts) <= 1:
-            word = parts[0].lower() if parts else ""
-            for cmd in sorted(self.commands):
-                if cmd.startswith(word):
-                    yield Completion(cmd + " ", start_position=-len(word), display=cmd, display_meta=self.commands[cmd][0])
-            return
-
-
-def route_command(text: str) -> str | None:
-    text_lower = text.strip().lower()
-    if text_lower.split()[0] in ZEPHYR_COMMANDS:
-        return text_lower.split()[0]
-    tokens = set(re.findall(r"[a-zA-Z]+", text_lower))
-    for token in tokens:
-        if token in NL_ROUTES:
-            return NL_ROUTES[token]
-    return None
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "doctor",
+            "description": "Check Zephyr development environment (west, cmake, ninja, python, probe tools)",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_boards",
+            "description": "List available Zephyr boards, optionally filtered by name",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter": {"type": "string", "description": "Optional filter text to search board names"}
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_board",
+            "description": "Set the default target board for future operations",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Board name (e.g. nucleo_f411re)"}
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_project",
+            "description": "Create a new Zephyr application project",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Project name"},
+                    "board": {"type": "string", "description": "Target board (default: current default)"},
+                    "output_dir": {"type": "string", "description": "Output directory path (optional)"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_project",
+            "description": "Build a Zephyr project using west build",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Project directory (default: current context)"},
+                    "board": {"type": "string", "description": "Board (default: current default)"},
+                    "pristine": {"type": "boolean", "description": "Force clean build"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "flash_firmware",
+            "description": "Flash built firmware to the target device",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "build_dir": {"type": "string", "description": "Build directory (default: current build dir)"},
+                    "runner": {"type": "string", "description": "Zephyr runner name (optional)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "monitor_logs",
+            "description": "Connect to device serial/RTT log output",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "build_dir": {"type": "string", "description": "Build directory (optional)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_context",
+            "description": "Show current session context: project path, board, build directory",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read contents of a project file (main.c, prj.conf, overlay, CMakeLists.txt, etc.)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (relative or absolute)"}
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to a project file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (relative or absolute)"},
+                    "content": {"type": "string", "description": "File content to write"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+]
 
 
 class ZephyrRepl:
     def __init__(self, work_dir: str | Path | None = None, default_board: str = "nucleo_f411re"):
         self.client = ZephyrToolsClient(work_dir=work_dir, default_board=default_board)
-        self.session = PromptSession(
-            history=FileHistory(str(HISTORY_FILE)),
-            completer=ZephyrCompleter(ZEPHYR_COMMANDS),
-            style=style,
-            enable_history_search=True,
-        )
+        self.messages: list[dict] = []
         self.ctx_project: str | None = None
         self.ctx_board: str = default_board
         self.ctx_build_dir: str = "build"
 
     def run(self):
         self._banner()
-        while True:
-            try:
-                text = self.session.prompt([("class:prompt", "zt> ")]).strip()
-            except (EOFError, KeyboardInterrupt):
-                console.print("\n[yellow]Bye.[/yellow]")
-                break
-            if not text:
-                continue
-            result = self._execute(text)
-            if result == "quit":
-                break
-
-    def _execute(self, text: str) -> str | None:
-        cmd_name = route_command(text)
-        if cmd_name is None:
-            _fail(f"Unknown command: {text[:60]}")
-            _info("Type 'help' to see available commands.")
-            return None
+        api_key, base_url, model = self._resolve_api()
+        if not api_key:
+            return
+        if OpenAI is None:
+            console.print("[red]openai package not installed. Run: pip install openai[/red]")
+            return
+        self.llm = OpenAI(api_key=api_key, base_url=base_url)
+        self.model = model
+        self.messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        self.messages.append({
+            "role": "system",
+            "content": f"Work directory: {self.client.work_dir}\nDefault board: {self.ctx_board}",
+        })
         try:
-            handler = getattr(self, f"cmd_{cmd_name}", None)
-            if handler is None:
-                _fail(f"Command '{cmd_name}' not implemented")
-                return None
-            return handler(text)
-        except ZephyrToolsError as e:
-            _fail(str(e)[:300])
+            while True:
+                try:
+                    text = input("\nzt> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    console.print("\n[yellow]Goodbye.[/yellow]")
+                    break
+                if not text:
+                    continue
+                if text.lower() in ("quit", "exit"):
+                    console.print("[yellow]Goodbye.[/yellow]")
+                    break
+                if text.lower() == "clear":
+                    console.clear()
+                    continue
+                self.messages.append({"role": "user", "content": text})
+                self._process_turn()
         except Exception as e:
-            _fail(f"Error: {e}")
-        return None
+            console.print(f"\n[red]Fatal: {e}[/red]")
 
-    def cmd_doctor(self, text: str) -> str | None:
-        checks = self.client.doctor()
-        t = Table(box=box.SIMPLE)
-        t.add_column("Status", width=6)
-        t.add_column("Check", width=14)
-        t.add_column("Detail")
-        t.add_column("Hint")
-        for c in checks:
-            status = "[green]OK[/green]" if c.ok else "[red]FAIL[/red]"
-            t.add_row(status, c.name, c.detail, c.hint or "")
-        console.print(Panel(t, title="[bold]Environment Check[/bold]", border_style="blue"))
-        return None
+    def _resolve_api(self) -> tuple[str | None, str | None, str]:
+        api_key, base_url, model = get_llm_config(self.client.work_dir)
+        if api_key:
+            return api_key, base_url, model
+        console.print(Panel(
+            "[yellow]No API key found.[/yellow]\n\n"
+            "The conversational REPL needs an OpenAI-compatible API key.\n\n"
+            "Options:\n"
+            "1. Set OPENAI_API_KEY in your environment\n"
+            "2. Create a .env file:\n"
+            "   OPENAI_API_KEY=sk-...\n"
+            "   OPENAI_API_BASE=https://api.openai.com/v1\n"
+            "   OPENAI_MODEL=gpt-4o-mini\n\n"
+            "3. Enter one now:",
+            title="LLM Configuration",
+            border_style="yellow",
+        ))
+        try:
+            key = input("API key (Enter to skip): ").strip()
+            if not key:
+                console.print("[yellow]Skipped. Use CLI mode instead.[/yellow]")
+                return None, None, ""
+            base = input("Base URL [https://api.openai.com/v1]: ").strip() or "https://api.openai.com/v1"
+            mdl = input("Model [gpt-4o-mini]: ").strip() or "gpt-4o-mini"
+            env_path = self.client.work_dir / ".env"
+            with open(env_path, "w") as f:
+                f.write(f"OPENAI_API_KEY={key}\nOPENAI_API_BASE={base}\nOPENAI_MODEL={mdl}\n")
+            console.print(f"[green]Saved to {env_path}[/green]")
+            return key, base, mdl
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[yellow]Skipped.[/yellow]")
+            return None, None, ""
 
-    def cmd_init(self, text: str) -> str | None:
-        args = shlex.split(text)[1:]
-        manifest_url = None
-        manifest_rev = None
-        update = False
-        i = 0
-        while i < len(args):
-            if args[i] == "--manifest-url" and i + 1 < len(args):
-                manifest_url = args[i + 1]; i += 2
-            elif args[i] == "--manifest-rev" and i + 1 < len(args):
-                manifest_rev = args[i + 1]; i += 2
-            elif args[i] == "--update":
-                update = True; i += 1
-            else:
-                i += 1
-        results = self.client.init(manifest_url, manifest_rev, update=update)
-        for r in results:
-            if r.ok:
-                _ok(r.output or f"Ran: {' '.join(r.args)}")
-            else:
-                _fail(r.output or "init failed")
-                return None
-        _ok("Workspace initialized")
-        return None
+    def _process_turn(self):
+        try:
+            stream = self.llm.chat.completions.create(
+                model=self.model,
+                messages=self.messages,
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+                stream=True,
+            )
+        except APIError as e:
+            console.print(f"[red]API error: {e}[/red]")
+            self.messages.pop()
+            return
 
-    def cmd_boards(self, text: str) -> str | None:
-        parts = shlex.split(text)
-        name_filter = parts[1] if len(parts) > 1 else None
-        boards = self.client.list_boards(name_filter)
+        content_buffer = ""
+        tool_calls: dict[int, dict] = {}
+        finish_reason = None
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            finish = chunk.choices[0].finish_reason
+            if finish:
+                finish_reason = finish
+            if delta is None:
+                continue
+            if delta.content:
+                content_buffer += delta.content
+                print(delta.content, end="", flush=True)
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls:
+                        tool_calls[idx] = {"id": "", "function": {"name": "", "arguments": ""}}
+                    if tc.id:
+                        tool_calls[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls[idx]["function"]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            tool_calls[idx]["function"]["arguments"] += tc.function.arguments
+        print()
+
+        if content_buffer:
+            self.messages.append({"role": "assistant", "content": content_buffer})
+
+        if finish_reason == "tool_calls" and tool_calls:
+            for tc in tool_calls.values():
+                tc["function"]["arguments"] = _clean_json(tc["function"]["arguments"])
+            assistant_msg = {
+                "role": "assistant",
+                "content": content_buffer or None,
+                "tool_calls": [
+                    {"id": tc["id"], "type": "function", "function": tc["function"]}
+                    for tc in tool_calls.values()
+                ],
+            }
+            self.messages.append(assistant_msg)
+            for tc in tool_calls.values():
+                name = tc["function"]["name"]
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+                console.print(f"[dim]>> tool: {name}{args}[/dim]")
+                result = self._exec_tool(name, args)
+                trunc = result[:500] + "..." if len(result) > 500 else result
+                console.print(f"[dim]<< result: {trunc}[/dim]")
+                self.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+            self._process_turn()
+
+    def _exec_tool(self, name: str, args: dict) -> str:
+        handler = getattr(self, f"_tool_{name}", None)
+        if handler is None:
+            return f"ERROR: unknown tool '{name}'"
+        try:
+            return handler(**args)
+        except ZephyrToolsError as e:
+            return f"ERROR: {e}"
+        except FileNotFoundError as e:
+            return f"ERROR: file not found: {e}"
+        except TypeError as e:
+            return f"ERROR: invalid arguments for {name}: {e}"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    def _tool_doctor(self) -> str:
+        results = self.client.doctor()
+        return "\n".join(
+            f"[{'OK' if c.ok else 'FAIL'}] {c.name}: {c.detail}"
+            + (f"  hint: {c.hint}" if c.hint else "")
+            for c in results
+        )
+
+    def _tool_list_boards(self, filter: str | None = None) -> str:
+        boards = self.client.list_boards(filter or None)
         if not boards:
-            _fail("No boards found. Are you in a Zephyr workspace?")
-            return None
-        t = Table(box=box.SIMPLE)
-        t.add_column("Board Name", style="cyan")
-        t.add_column("Arch")
-        t.add_column("Vendor")
+            return "No boards found." if not filter else f"No boards match filter '{filter}'"
+        lines = [f"Found {len(boards)} board(s):"]
         for b in boards:
-            t.add_row(b.name, b.arch or "-", b.vendor or "-")
-        console.print(Panel(t, title=f"Zephyr Boards ({len(boards)})", border_style="green"))
-        return None
+            lines.append(f"  {b.name}  arch={b.arch or '-'}  vendor={b.vendor or '-'}")
+        return "\n".join(lines)
 
-    def cmd_board(self, text: str) -> str | None:
-        parts = shlex.split(text)
-        if len(parts) < 2:
-            _fail("Usage: board <name>")
-            return None
-        name = parts[1]
+    def _tool_set_board(self, name: str) -> str:
         self.ctx_board = name
         self.client.default_board = name
-        _ok(f"Default board set to: {name}")
-        return None
+        return f"Board set to {name}"
 
-    def cmd_create(self, text: str) -> str | None:
-        args = shlex.split(text)
-        if len(args) < 2:
-            _fail("Usage: create <name> [--board BOARD] [--output DIR]")
-            return None
-        name = args[1]
-        board = self.ctx_board
-        output_dir = None
-        i = 2
-        while i < len(args):
-            if args[i] == "--board" and i + 1 < len(args):
-                board = args[i + 1]; i += 2
-            elif args[i] == "--output" and i + 1 < len(args):
-                output_dir = Path(args[i + 1]); i += 2
-            else:
-                i += 1
-        project = self.client.create(name, board=board, output_dir=output_dir)
+    def _tool_create_project(self, name: str, board: str | None = None, output_dir: str | None = None) -> str:
+        board = board or self.ctx_board
+        out = Path(output_dir) if output_dir else None
+        project = self.client.create(name, board=board, output_dir=out)
         self.ctx_project = str(project.path)
         self.ctx_board = board
-        _ok(f"Project [bold]{name}[/bold] created at [cyan]{project.path}[/cyan]")
-        _info(f"Board: {board}")
-        return None
+        return f"Project created at {project.path} (board: {board})"
 
-    def cmd_select(self, text: str) -> str | None:
-        parts = shlex.split(text)
-        if len(parts) < 2:
-            _fail("Usage: select <path>")
-            return None
-        path = Path(parts[1]).resolve()
-        if not path.exists():
-            _fail(f"Path does not exist: {path}")
-            return None
-        self.ctx_project = str(path)
-        _ok(f"Context set to: {path}")
-        return None
-
-    def cmd_build(self, text: str) -> str | None:
-        project = self.ctx_project
+    def _tool_build_project(self, project_dir: str | None = None, board: str | None = None, pristine: bool = False) -> str:
+        project = project_dir or self.ctx_project
         if not project:
-            _fail("No project in context. Use 'create <name>' or 'select <path>' first.")
-            return None
-        args = shlex.split(text)
-        board = self.ctx_board
-        pristine = False
-        build_dir = self.ctx_build_dir
-        i = 1
-        while i < len(args):
-            if args[i] == "--board" and i + 1 < len(args):
-                board = args[i + 1]; i += 2
-            elif args[i] == "--pristine":
-                pristine = True; i += 1
-            elif args[i] == "--build-dir" and i + 1 < len(args):
-                build_dir = args[i + 1]; i += 2
-            else:
-                if not args[i].startswith("--"):
-                    project = args[i]
-                i += 1
-        with console.status(f"[bold blue]Building {Path(project).name} for {board}...", spinner="dots"):
-            result = self.client.build(project, board=board, build_dir=build_dir, pristine=pristine)
+            return "ERROR: no project selected"
+        board = board or self.ctx_board
+        result = self.client.build(project, board=board, pristine=pristine)
         self.ctx_build_dir = str(result.build_dir)
-        _ok("Build complete")
-        _info(f"Build dir: [cyan]{result.build_dir}[/cyan]")
+        lines = [f"Build complete: {result.build_dir}"]
         if result.elf_path:
-            _info(f"ELF: [cyan]{result.elf_path}[/cyan]")
-        return None
+            lines.append(f"ELF: {result.elf_path}")
+        return "\n".join(lines)
 
-    def cmd_flash(self, text: str) -> str | None:
-        args = shlex.split(text)
-        runner = None
-        build_dir = self.ctx_build_dir
-        i = 1
-        while i < len(args):
-            if args[i] == "--runner" and i + 1 < len(args):
-                runner = args[i + 1]; i += 2
-            elif args[i] == "--build-dir" and i + 1 < len(args):
-                build_dir = args[i + 1]; i += 2
-            else:
-                i += 1
-        with console.status(f"[bold blue]Flashing {build_dir}...", spinner="dots"):
-            self.client.flash(build_dir, runner_name=runner)
-        _ok("Flash complete")
-        return None
+    def _tool_flash_firmware(self, build_dir: str | None = None, runner: str | None = None) -> str:
+        bd = build_dir or self.ctx_build_dir
+        self.client.flash(bd, runner_name=runner)
+        return "Flash complete"
 
-    def cmd_monitor(self, text: str) -> str | None:
-        args = shlex.split(text)
-        build_dir = self.ctx_build_dir
-        i = 1
-        while i < len(args):
-            if args[i] == "--build-dir" and i + 1 < len(args):
-                build_dir = args[i + 1]; i += 2
-            else:
-                i += 1
-        _info("Connecting to monitor...")
-        result = self.client.monitor(build_dir=build_dir)
-        console.print(result.output)
-        return None
+    def _tool_monitor_logs(self, build_dir: str | None = None) -> str:
+        bd = build_dir or self.ctx_build_dir
+        result = self.client.monitor(build_dir=bd)
+        return result.output or "[connected]"
 
-    def cmd_gen(self, text: str) -> str | None:
-        args = shlex.split(text)
-        if len(args) < 2:
-            _fail('Usage: gen "<prompt>" [--board BOARD] [--output DIR]')
-            return None
-        prompt_parts = []
-        board = self.ctx_board
-        output = "generated"
-        i = 1
-        while i < len(args):
-            if args[i] == "--board" and i + 1 < len(args):
-                board = args[i + 1]; i += 2
-            elif args[i] == "--output" and i + 1 < len(args):
-                output = args[i + 1]; i += 2
-            else:
-                prompt_parts.append(args[i]); i += 1
-        prompt = " ".join(prompt_parts)
-        with console.status(f"[bold blue]Generating: {prompt[:60]}...", spinner="dots"):
-            project = self.client.gen(prompt, Path(output), board=board)
-        self.ctx_project = str(project.path)
-        _ok(f"Generated at [cyan]{project.path}[/cyan]")
-        return None
+    def _tool_show_context(self) -> str:
+        return (
+            f"Project:  {self.ctx_project or '(none)'}\n"
+            f"Board:    {self.ctx_board}\n"
+            f"Build dir:{self.ctx_build_dir}\n"
+            f"Work dir: {self.client.work_dir}"
+        )
 
-    def cmd_fix(self, text: str) -> str | None:
-        args = shlex.split(text)
-        if len(args) < 3:
-            _fail('Usage: fix <project> "<prompt>" --error-file FILE')
-            return None
-        project = args[1] if len(args) > 1 else self.ctx_project
-        prompt_parts = []
-        error_file = None
-        i = 2
-        while i < len(args):
-            if args[i] == "--error-file" and i + 1 < len(args):
-                error_file = args[i + 1]; i += 2
-            else:
-                prompt_parts.append(args[i]); i += 1
-        prompt = " ".join(prompt_parts)
-        if not error_file:
-            _fail("--error-file is required")
-            return None
-        path = Path(error_file)
-        build_error = path.read_text(encoding="utf-8") if path.exists() else error_file
-        with console.status("[bold blue]Fixing...", spinner="dots"):
-            result = self.client.fix(project, prompt, build_error, board=self.ctx_board)
-        _ok(f"Fixed at [cyan]{result.path}[/cyan]")
-        return None
+    def _tool_read_file(self, path: str) -> str:
+        p = Path(path)
+        if not p.is_absolute():
+            p = (self.client.work_dir / p).resolve()
+        if not p.exists():
+            return f"ERROR: file not found: {p}"
+        return p.read_text(encoding="utf-8")
 
-    def cmd_ask(self, text: str) -> str | None:
-        parts = shlex.split(text)
-        if len(parts) < 2:
-            _fail('Usage: ask "<question>"')
-            return None
-        question = " ".join(parts[1:])
-        try:
-            from openai import OpenAI
-            cfg = self.client.codegen._resolve_config(None, None, None)
-            client = OpenAI(api_key=cfg[0], base_url=cfg[1])
-            with console.status("[bold blue]Thinking...", spinner="dots"):
-                resp = client.chat.completions.create(
-                    model=cfg[2],
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": question},
-                    ],
-                )
-            console.print(Panel(resp.choices[0].message.content or "", title="Answer", border_style="green"))
-        except Exception as e:
-            _fail(str(e)[:200])
-        return None
-
-    def cmd_status(self, text: str) -> str | None:
-        t = Table(box=box.SIMPLE, show_header=False)
-        t.add_column("Key", style="bold", width=14)
-        t.add_column("Value")
-        t.add_row("Project", self.ctx_project or "(none)")
-        t.add_row("Board", self.ctx_board)
-        t.add_row("Build dir", self.ctx_build_dir)
-        t.add_row("Work dir", str(self.client.work_dir))
-        console.print(Panel(t, title="Session Context", border_style="blue"))
-        return None
-
-    def cmd_help(self, text: str) -> str | None:
-        t = Table(box=box.SIMPLE)
-        t.add_column("Command", style="cyan", width=10)
-        t.add_column("Description")
-        t.add_column("Usage")
-        for cmd, (desc, usage) in sorted(ZEPHYR_COMMANDS.items()):
-            if cmd in ("quit", "exit"):
-                continue
-            t.add_row(cmd, desc, usage)
-        console.print(Panel(t, title="Zephyr Tools Commands", border_style="blue"))
-        _info("\nTip: You can also use natural language like 'check environment' -> doctor, 'list boards' -> boards")
-        return None
-
-    def cmd_clear(self, text: str) -> str | None:
-        console.clear()
-        return None
-
-    def cmd_quit(self, text: str) -> str | None:
-        console.print("[yellow]Bye.[/yellow]")
-        return "quit"
-
-    def cmd_exit(self, text: str) -> str | None:
-        return self.cmd_quit(text)
+    def _tool_write_file(self, path: str, content: str) -> str:
+        p = Path(path)
+        if not p.is_absolute():
+            p = (self.client.work_dir / p).resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return f"Written {len(content)} bytes to {p}"
 
     def _banner(self):
         from . import __version__
-        banner = Panel(
+        console.print(Panel(
             Text.from_markup(
-                f"[bold cyan]Zephyr Tools v{__version__}[/bold cyan]\n"
-                "[dim]Interactive CLI for Zephyr RTOS embedded development[/dim]\n"
-                "[dim]Type [bold]help[/bold] for commands  |  Ctrl+C or [bold]quit[/bold] to exit[/dim]"
+                "[bold cyan]Zephyr Tools[/bold cyan]  "
+                f"[dim]v{__version__}[/dim]\n"
+                "[dim]Conversational REPL -- describe what you want to do[/dim]\n"
+                "[dim]quit / Ctrl+C to exit  |  clear to clear screen[/dim]"
             ),
             box=box.HEAVY,
             border_style="cyan",
-        )
-        console.print(banner)
+        ))
+
+
+def _clean_json(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
 
 
 def run_repl(work_dir: str | Path | None = None, default_board: str = "nucleo_f411re") -> int:
-    repl = ZephyrRepl(work_dir=work_dir, default_board=default_board)
-    repl.run()
+    ZephyrRepl(work_dir=work_dir, default_board=default_board).run()
+    return 0
+def run_repl(work_dir: str | Path | None = None, default_board: str = "nucleo_f411re") -> int:
+    ZephyrRepl(work_dir=work_dir, default_board=default_board).run()
     return 0
