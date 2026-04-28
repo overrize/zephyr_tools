@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from rich.console import Console
@@ -23,19 +24,18 @@ except ImportError:
     APIError = Exception
 
 
-SYSTEM_PROMPT = """You are an embedded development assistant for Zephyr RTOS. You help users build, flash, and debug embedded firmware.
+SYSTEM_PROMPT = """You are a professional embedded development engineer for Zephyr RTOS. You autonomously handle everything from environment setup to building, flashing, debugging, and code generation.
 
-You have tools for environment checks, board listing, project creation, building, flashing, monitoring, and file editing.
+You have tools for environment checks, board listing, project creation, building, flashing, monitoring, file editing, and running shell commands.
 
 RULES:
-1. Always run doctor first if you are unsure about toolchain state.
-2. Use create_project to scaffold a Zephyr app. Default board: nucleo_f411re.
-3. Use the current project context for builds unless the user specifies otherwise.
-4. Explain what you are doing in simple terms.
-5. If a tool fails, explain the error and suggest fixes.
-6. Keep responses concise.
-7. Context is maintained between turns (project, board, build dir).
-"""
+1. You are a PROFESSIONAL engineer. Never ask the user to do things manually. Automatically fix issues yourself using your tools.
+2. Always run doctor first if unsure about toolchain state. If something is missing (like west), install it automatically with run_command.
+3. Use create_project to scaffold Zephyr apps. Default board: nucleo_f411re.
+4. Use the current project context for builds unless the user specifies otherwise.
+5. Explain what you are doing briefly, then DO IT. Don't just tell the user what to do.
+6. Keep responses concise and action-oriented.
+7. Context is maintained between turns (project, board, build dir)."""
 
 TOOL_DEFINITIONS = [
     {
@@ -153,18 +153,33 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write content to a project file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path (relative or absolute)"},
+                        "content": {"type": "string", "description": "File content to write"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
     {
         "type": "function",
         "function": {
-            "name": "write_file",
-            "description": "Write content to a project file",
+            "name": "run_command",
+            "description": "Run a shell command (e.g. pip install, git clone, west update). Use this to automatically fix environment issues.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path (relative or absolute)"},
-                    "content": {"type": "string", "description": "File content to write"},
+                    "command": {"type": "string", "description": "Shell command to execute, e.g. 'pip install west'"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default 120)"},
                 },
-                "required": ["path", "content"],
+                "required": ["command"],
             },
         },
     },
@@ -414,6 +429,22 @@ class ZephyrRepl:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return f"Written {len(content)} bytes to {p}"
+
+    def _tool_run_command(self, command: str, timeout: int = 120) -> str:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output = result.stdout.strip()
+        if result.stderr:
+            output += "\n" + result.stderr.strip()
+        output = output or "(no output)"
+        if result.returncode != 0:
+            output = f"EXIT CODE: {result.returncode}\n{output}"
+        return output[:2000]
 
     def _banner(self):
         from . import __version__
