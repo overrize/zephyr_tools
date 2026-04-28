@@ -95,7 +95,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "create_project",
-            "description": "Create a new Zephyr application project",
+            "description": "Create a new Zephyr application project. After creation, the user can /fork to open a dedicated REPL for this project.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -283,6 +283,14 @@ class ZephyrRepl:
                     continue
                 if text.lower() == "status":
                     self._show_context_full()
+                    continue
+                if text.lower().startswith("/fork"):
+                    parts = text.split(maxsplit=1)
+                    target = parts[1] if len(parts) > 1 else (self.ctx_project or "")
+                    self._fork_session(target)
+                    continue
+                if text.lower() == "/help":
+                    self._show_slash_help()
                     continue
                 self.messages.append({"role": "user", "content": text})
                 self._process_turn()
@@ -618,7 +626,9 @@ class ZephyrRepl:
         self.messages.append({
             "role": "system", "content": workspace.describe_workspace(self.client.work_dir),
         })
-        console.print(f"[green]New session. Old saved as {old_id}[/green]")
+        console.print(f"[green]New session started. Previous saved as[/green] [cyan]{old_id}[/cyan]")
+        tip = random.choice(_TIPS)
+        console.print(f"[dim]{tip}[/dim]")
 
     def _show_context_full(self):
         t = Table(box=box.SIMPLE, show_header=False)
@@ -632,6 +642,38 @@ class ZephyrRepl:
         if self._session:
             t.add_row("Session", self._session.session_id)
         console.print(Panel(t, title="Context", border_style="blue"))
+
+    def _fork_session(self, target: str):
+        path = Path(target).resolve() if target else self.client.work_dir
+        if not path.exists():
+            console.print(f"[red]Path not found: {path}[/red]")
+            return
+        sid = self._session.session_id if self._session else "new"
+        if os.name == "nt":
+            cmd = f'start "Zephyr Tools - {path.name}" cmd /k "zt repl --resume {sid}"'
+            subprocess.Popen(cmd, shell=True)
+        else:
+            cmd = ["x-terminal-emulator", "-e", f"zt repl --resume {sid}"]
+            subprocess.Popen(cmd)
+        console.print(f"[green]Forked session[/green] [dim]{sid}[/dim] [dim]at[/dim] [cyan]{path}[/cyan]")
+
+    def _show_slash_help(self):
+        console.print(Panel(
+            "[bold]Slash Commands:[/bold]\n"
+            "  /new        Start a fresh conversation (current session auto-saved)\n"
+            "  /fork       Open a new terminal with a dedicated REPL for current project\n"
+            "  /fork <dir> Open a new terminal with a dedicated REPL for a specific project\n"
+            "  /resume     List and resume a saved session\n"
+            "  /sessions   List all saved sessions\n"
+            "  /help       Show this help\n"
+            "  status      Show current context\n"
+            "  clear       Clear screen\n"
+            "  quit / exit Exit\n"
+            "\n"
+            "[dim]You can also just describe what you want in natural language.[/dim]",
+            title="Help",
+            border_style="blue",
+        ))
 
     def _banner(self, resumed: bool = False):
         from . import __version__
