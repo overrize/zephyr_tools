@@ -293,8 +293,11 @@ class ZephyrRepl:
             if delta.content:
                 content_buffer += delta.content
                 print(delta.content, end="", flush=True)
-            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                reasoning_buffer += delta.reasoning_content
+            rc = getattr(delta, "reasoning_content", None)
+            if rc is None:
+                rc = delta.model_extra.get("reasoning_content") if hasattr(delta, "model_extra") and delta.model_extra else None
+            if rc:
+                reasoning_buffer += rc
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
@@ -310,7 +313,13 @@ class ZephyrRepl:
         print()
 
         if content_buffer:
-            self.messages.append({"role": "assistant", "content": content_buffer})
+            msg: dict = {"role": "assistant", "content": content_buffer}
+            if reasoning_buffer:
+                msg["reasoning_content"] = reasoning_buffer
+            self.messages.append(msg)
+        elif reasoning_buffer and not tool_calls:
+            msg = {"role": "assistant", "content": None, "reasoning_content": reasoning_buffer}
+            self.messages.append(msg)
 
         if finish_reason == "tool_calls" and tool_calls:
             for tc in tool_calls.values():
