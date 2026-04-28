@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import random
 import subprocess
 from pathlib import Path
 
@@ -20,11 +22,24 @@ from .skills import load_skills
 
 console = Console()
 
+_NO_COLOR = os.environ.get("NO_COLOR", "").strip()
+if _NO_COLOR:
+    console = Console(no_color=True)
+
 try:
     from openai import OpenAI, APIError
 except ImportError:
     OpenAI = None
     APIError = Exception
+
+_TIPS = [
+    "Tip: Say 'check my environment' to run doctor",
+    "Tip: 'create blink --board nucleo_f411re' to start a project",
+    "Tip: Context is remembered -- 'create' once, then just 'build'",
+    "Tip: Type /new to start a fresh conversation",
+    "Tip: 'status' shows your current project and board",
+    "Tip: Use 'fix' with --error-file to auto-repair build errors",
+]
 
 
 SYSTEM_PROMPT = """You are a professional embedded development engineer for Zephyr RTOS. You autonomously handle everything from environment setup to building, flashing, debugging, and code generation.
@@ -199,6 +214,16 @@ class ZephyrRepl:
         self._session: session_store.ZephyrSession | None = None
         self._resume_id = resume_session_id
 
+    def _prompt(self) -> str:
+        ctx = ""
+        if self.ctx_project:
+            ctx = Path(self.ctx_project).name
+        elif self.ctx_board:
+            ctx = self.ctx_board
+        if ctx:
+            return f"zt [dim]{ctx}[/dim]> " if not _NO_COLOR else f"zt [{ctx}]> "
+        return "zt> "
+
     def run(self):
         ws_path = workspace.prompt_workspace()
         if str(ws_path) != str(self.client.work_dir):
@@ -225,7 +250,17 @@ class ZephyrRepl:
         try:
             while True:
                 try:
-                    text = input("\nzt> ").strip()
+                    if _NO_COLOR:
+                        prompt_str = "zt" + (f" [{Path(self.ctx_project).name}]" if self.ctx_project else "")
+                        prompt_str += "> "
+                    else:
+                        ctx = ""
+                        if self.ctx_project:
+                            ctx = Path(self.ctx_project).name
+                        elif self.ctx_board:
+                            ctx = self.ctx_board
+                        prompt_str = f"zt [dim]{ctx}[/dim]> " if ctx else "zt> "
+                    text = input(prompt_str).strip()
                 except (EOFError, KeyboardInterrupt):
                     self._save_and_exit()
                     break
@@ -245,6 +280,9 @@ class ZephyrRepl:
                     continue
                 if text.lower() == "/new":
                     self._start_new_session()
+                    continue
+                if text.lower() == "status":
+                    self._show_context_full()
                     continue
                 self.messages.append({"role": "user", "content": text})
                 self._process_turn()
@@ -365,10 +403,15 @@ class ZephyrRepl:
                     args = json.loads(tc["function"]["arguments"])
                 except json.JSONDecodeError:
                     args = {}
-                console.print(f"[dim]>> tool: {name}{args}[/dim]")
+                arg_str = " ".join(f"{k}={v}" for k, v in args.items()) if args else ""
+                label = f"  {name} {arg_str}" if arg_str else f"  {name}"
+                console.print(Panel(label, border_style="dim", padding=(0, 1)))
                 result = self._exec_tool(name, args)
-                trunc = result[:500] + "..." if len(result) > 500 else result
-                console.print(f"[dim]<< result: {trunc}[/dim]")
+                lines = result.split("\n")
+                display = "\n".join(lines[:5])
+                if len(lines) > 5:
+                    display += f"\n  ... ({len(lines) - 5} more lines)"
+                console.print(Panel(display, border_style="green" if "ERROR" not in result else "red", padding=(0, 1)))
                 self.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
             self._process_turn()
 
@@ -527,8 +570,8 @@ class ZephyrRepl:
 
     def _save_and_exit(self):
         self._auto_save()
-        sid = self._session.session_id if self._session else "unknown"
-        console.print(f"\n[yellow]Session saved.[/yellow] [dim]Resume: zt repl --resume {sid}[/dim]")
+        sid = self._session.session_id if self._session else ""
+        console.print(f"\n[green]Session saved.[/green] [dim]Resume:[/dim] zt repl --resume {sid}")
         console.print("[yellow]Goodbye.[/yellow]")
 
     def _auto_save(self):
@@ -577,14 +620,32 @@ class ZephyrRepl:
         })
         console.print(f"[green]New session. Old saved as {old_id}[/green]")
 
+    def _show_context_full(self):
+        t = Table(box=box.SIMPLE, show_header=False)
+        t.add_column("Key", style="bold", width=12)
+        t.add_column("Value")
+        t.add_row("Workspace", str(self.client.work_dir))
+        t.add_row("Project", self.ctx_project or "(none)")
+        t.add_row("Board", self.ctx_board)
+        t.add_row("Build dir", self.ctx_build_dir)
+        t.add_row("Messages", str(len(self.messages)))
+        if self._session:
+            t.add_row("Session", self._session.session_id)
+        console.print(Panel(t, title="Context", border_style="blue"))
+
     def _banner(self, resumed: bool = False):
         from . import __version__
+
+        if resumed:
+            tag = "[dim]Session resumed[/dim]"
+        else:
+            tag = "[dim]quit / Ctrl+C to exit  |  /new for fresh session[/dim]"
+        tip = random.choice(_TIPS)
         console.print(Panel(
             Text.from_markup(
-                "[bold cyan]Zephyr Tools[/bold cyan]  "
-                f"[dim]v{__version__}[/dim]\n"
-                "[dim]Conversational REPL -- describe what you want to do[/dim]\n"
-                "[dim]quit / Ctrl+C to exit  |  clear to clear screen[/dim]"
+                f"[bold cyan]Zephyr Tools[/bold cyan]  "
+                f"[dim]v{__version__}[/dim]  {tag}\n"
+                f"[dim]{tip}[/dim]"
             ),
             box=box.HEAVY,
             border_style="cyan",
