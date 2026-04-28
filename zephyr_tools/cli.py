@@ -73,7 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     p_fix.add_argument("--error-file", type=Path, help="包含构建错误的文本文件")
     p_fix.set_defaults(func=_cmd_fix)
 
-    p_tui = sub.add_parser("tui", help="启动 TUI")
+    p_repl = sub.add_parser("repl", help="启动交互式 REPL (类似 Claude Code 的对话式 CLI)")
+    p_repl.set_defaults(func=_cmd_repl)
+
+    p_tui = sub.add_parser("tui", help="启动 TUI (简单菜单界面)")
     p_tui.set_defaults(func=_cmd_tui)
 
     p_api = sub.add_parser("api", help="启动 Desktop/Web 共用的本地 API")
@@ -170,6 +173,12 @@ def _cmd_fix(client: ZephyrToolsClient, args) -> int:
     project = client.fix(args.project, args.prompt, build_error)
     print(f"已修复项目: {project.path}")
     return 0
+
+
+def _cmd_repl(client: ZephyrToolsClient, args) -> int:
+    from .repl import run_repl
+
+    return run_repl(work_dir=client.work_dir, default_board=client.default_board)
 
 
 def _cmd_tui(client: ZephyrToolsClient, args) -> int:

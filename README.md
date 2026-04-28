@@ -68,6 +68,7 @@ zt shell [-d build]           # Connect to Zephyr shell
 zt gen "<prompt>"             # LLM generate app code
 zt fix <project> <prompt>     # LLM fix build errors
 zt tui                        # Launch text UI
+zt repl                       # Launch interactive REPL (like Claude Code)
 zt api                        # Start local API server
 ```
 
