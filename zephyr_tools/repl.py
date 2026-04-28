@@ -262,6 +262,7 @@ class ZephyrRepl:
             return
 
         content_buffer = ""
+        reasoning_buffer = ""
         tool_calls: dict[int, dict] = {}
         finish_reason = None
 
@@ -277,6 +278,8 @@ class ZephyrRepl:
             if delta.content:
                 content_buffer += delta.content
                 print(delta.content, end="", flush=True)
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                reasoning_buffer += delta.reasoning_content
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
@@ -297,7 +300,7 @@ class ZephyrRepl:
         if finish_reason == "tool_calls" and tool_calls:
             for tc in tool_calls.values():
                 tc["function"]["arguments"] = _clean_json(tc["function"]["arguments"])
-            assistant_msg = {
+            assistant_msg: dict = {
                 "role": "assistant",
                 "content": content_buffer or None,
                 "tool_calls": [
@@ -305,6 +308,8 @@ class ZephyrRepl:
                     for tc in tool_calls.values()
                 ],
             }
+            if reasoning_buffer:
+                assistant_msg["reasoning_content"] = reasoning_buffer
             self.messages.append(assistant_msg)
             for tc in tool_calls.values():
                 name = tc["function"]["name"]
