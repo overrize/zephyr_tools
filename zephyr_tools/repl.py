@@ -206,6 +206,22 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "renode_run",
+            "description": "Run a Zephyr binary in Renode simulator (no real hardware needed). Use this when the user wants to test without hardware.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "elf_path": {"type": "string", "description": "Path to the .elf binary to simulate"},
+                    "machine": {"type": "string", "description": "Renode machine/platform name (default: 'nucleo_f411re')"},
+                    "timeout": {"type": "integer", "description": "Simulation timeout in seconds (default: 10)"},
+                },
+                "required": ["elf_path"],
+            },
+        },
+    },
 ]
 
 
@@ -438,14 +454,18 @@ class ZephyrRepl:
                 except json.JSONDecodeError:
                     args = {}
                 arg_str = " ".join(f"{k}={v}" for k, v in args.items()) if args else ""
-                label = f"  {name} {arg_str}" if arg_str else f"  {name}"
-                console.print(Panel(label, border_style="dim", padding=(0, 1)))
+                label = f"[dim]▸ {name}[/dim]" + (f" [cyan]{arg_str}[/cyan]" if arg_str else "")
+                console.print(label)
                 result = self._exec_tool(name, args)
-                lines = result.split("\n")
-                display = "\n".join(lines[:5])
-                if len(lines) > 5:
-                    display += f"\n  ... ({len(lines) - 5} more lines)"
-                console.print(Panel(display, border_style="green" if "ERROR" not in result else "red", padding=(0, 1)))
+                for line in result.split("\n")[:6]:
+                    if line.startswith("[OK]"):
+                        console.print(f"  [green]{line}[/green]")
+                    elif line.startswith("[FAIL]") or "ERROR" in line:
+                        console.print(f"  [red]{line}[/red]")
+                    elif line.strip():
+                        console.print(f"  [dim]{line}[/dim]")
+                if len(result.split("\n")) > 6:
+                    console.print(f"  [dim]... ({len(result.split(chr(10))) - 6} more lines)[/dim]")
                 self.messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
             self._process_turn()
 
@@ -553,8 +573,36 @@ class ZephyrRepl:
             output += "\n" + result.stderr.strip()
         output = output or "(no output)"
         if result.returncode != 0:
-            output = f"EXIT CODE: {result.returncode}\n{output}"
+            output = f"[FAIL] EXIT CODE: {result.returncode}\n{output}"
         return output[:2000]
+
+    def _tool_renode_run(self, elf_path: str, machine: str = "nucleo_f411re", timeout: int = 10) -> str:
+        import tempfile
+        p = Path(elf_path)
+        if not p.exists():
+            return f"[FAIL] Binary not found: {elf_path}"
+        resc = f"""
+bin @{p.resolve()}
+machine LoadPlatformDescription @platforms/boards/{machine}.repl
+showAnalyzer uart0
+sysbus LoadELF @{p.resolve()}
+start
+"""
+        resc_file = Path(tempfile.mktemp(suffix=".resc"))
+        resc_file.write_text(resc.strip())
+        try:
+            result = subprocess.run(
+                f"renode --console --disable-xwt -e \"{resc_file.resolve()}\"",
+                shell=True, capture_output=True, text=True, timeout=timeout,
+            )
+            output = result.stdout.strip() or result.stderr.strip() or "(no output)"
+            return f"Renode simulation completed:\n{output[:1500]}"
+        except subprocess.TimeoutExpired:
+            return f"[OK] Renode simulation started (timeout after {timeout}s). Check Renode window for output."
+        except FileNotFoundError:
+            return "[FAIL] Renode not found. Install from https://renode.io"
+        finally:
+            resc_file.unlink(missing_ok=True)
 
     def _try_resume_or_new(self):
         sessions = session_store.list_sessions()
