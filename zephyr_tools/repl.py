@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import random
 import subprocess
+import sys
 from pathlib import Path
 
 from rich.console import Console
@@ -334,14 +336,13 @@ class ZephyrRepl:
 
     def _process_turn(self):
         try:
-            with console.status("[dim]Thinking...[/dim]", spinner="dots"):
-                stream = self.llm.chat.completions.create(
-                    model=self.model,
-                    messages=self.messages,
-                    tools=TOOL_DEFINITIONS,
-                    tool_choice="auto",
-                    stream=True,
-                )
+            stream = self.llm.chat.completions.create(
+                model=self.model,
+                messages=self.messages,
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+                stream=True,
+            )
         except APIError as e:
             console.print(f"[red]API error: {e}[/red]")
             self.messages.pop()
@@ -351,6 +352,14 @@ class ZephyrRepl:
         reasoning_buffer = ""
         tool_calls: dict[int, dict] = {}
         finish_reason = None
+        _known_tool_names: set[str] = set()
+        _anim = itertools.cycle(["[dim]|[/dim]", "[dim]/[/dim]", "[dim]-[/dim]", "[dim]\\[/dim]"])
+
+        def _status(txt: str):
+            sys.stdout.write(f"\r{next(_anim)} {txt}\r")
+            sys.stdout.flush()
+
+        _status("Thinking...")
 
         for chunk in stream:
             if not chunk.choices:
@@ -380,6 +389,17 @@ class ZephyrRepl:
                             tool_calls[idx]["function"]["name"] += tc.function.name
                         if tc.function.arguments:
                             tool_calls[idx]["function"]["arguments"] += tc.function.arguments
+                current_names = set()
+                for tc in tool_calls.values():
+                    if tc["function"]["name"]:
+                        current_names.add(tc["function"]["name"])
+                if current_names != _known_tool_names:
+                    _known_tool_names = current_names
+                    _status(f"Calling: {', '.join(sorted(current_names))}")
+
+        if tool_calls:
+            sys.stdout.write(f"\r{' ' * 60}\r")
+            sys.stdout.flush()
 
         if content_buffer:
             msg: dict = {"role": "assistant", "content": content_buffer}
