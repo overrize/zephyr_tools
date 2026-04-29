@@ -23,6 +23,7 @@ from .errors import ZephyrToolsError
 from .llm.config import get_llm_config
 from . import session_store
 from . import workspace
+from . import log
 from .skills import load_skills
 
 console = Console()
@@ -470,8 +471,10 @@ class ZephyrRepl:
             self._process_turn()
 
     def _exec_tool(self, name: str, args: dict) -> str:
+        log.debug(f"tool call: {name}({json.dumps(args)[:200]})")
         handler = getattr(self, f"_tool_{name}", None)
         if handler is None:
+            log.error(f"unknown tool: {name}")
             return f"ERROR: unknown tool '{name}'"
         try:
             return handler(**args)
@@ -579,17 +582,21 @@ class ZephyrRepl:
     def _tool_renode_run(self, elf_path: str, machine: str = "nucleo_f411re", timeout: int = 30) -> str:
         p = Path(elf_path)
         if not p.exists():
+            log.error(f"renode_run: binary not found: {elf_path}")
             return f"[FAIL] Binary not found: {elf_path}"
 
+        log.info(f"renode_run: elf={elf_path} machine={machine} timeout={timeout}")
+
         console.print(f"  [dim]Checking Renode...[/dim]")
-        check = subprocess.run("where renode 2>nul || renode --version", shell=True, capture_output=True, text=True)
-        if check.returncode != 0 or "not recognized" in (check.stdout + check.stderr).lower():
-            return "[FAIL] Renode not found. Install from https://renode.io and ensure 'renode' is in PATH."
+        check = subprocess.run("renode --version", shell=True, capture_output=True, text=True)
+        if check.returncode != 0:
+            log.error(f"renode_run: renode not found (rc={check.returncode})")
+            return "[FAIL] Renode not found. Install from https://renode.io and add to PATH."
+        log.info(f"renode_run: renode version: {check.stdout.strip()[:100]}")
 
         console.print(f"  [dim]Building simulation script for {p.name}...[/dim]")
         import tempfile
         resc = f"""
-bin @{p.resolve()}
 machine LoadPlatformDescription @platforms/boards/{machine}.repl
 showAnalyzer uart0
 sysbus LoadELF @{p.resolve()}
@@ -597,23 +604,27 @@ start
 """
         resc_file = Path(tempfile.mktemp(suffix=".resc"))
         resc_file.write_text(resc.strip(), encoding="utf-8")
+        log.debug(f"renode_run: resc file at {resc_file}")
 
-        console.print(f"  [dim]Launching Renode simulator (timeout: {timeout}s)...[/dim]")
+        console.print(f"  [dim]Launching Renode (timeout: {timeout}s)...[/dim]")
         try:
             with console.status(f"[yellow]Running {p.name} on {machine}...[/yellow]", spinner="dots"):
                 result = subprocess.run(
                     f"renode --console --disable-xwt -e \"{resc_file.resolve()}\"",
                     shell=True, capture_output=True, text=True, timeout=timeout,
                 )
+            log.debug(f"renode_run: rc={result.returncode} stdout={result.stdout[:200]} stderr={result.stderr[:200]}")
             stdout = result.stdout.strip()[:1000]
             stderr = result.stderr.strip()[:500]
             if result.returncode == 0:
-                msg = stdout or "[OK] Renode simulation completed (no output)"
+                msg = stdout or "[OK] Simulation completed (no output)"
                 return f"[OK] Renode simulation completed\n{msg}"
             return f"[FAIL] Renode exited with code {result.returncode}\n{stderr or stdout[:500]}"
         except subprocess.TimeoutExpired:
-            return f"[OK] Renode simulation running (timeout after {timeout}s). The Renode window is open with serial output."
+            log.info(f"renode_run: timeout after {timeout}s (normal for long-running sim)")
+            return f"[OK] Renode simulation running (timeout after {timeout}s). Window is open."
         except Exception as e:
+            log.error(f"renode_run: exception: {e}")
             return f"[FAIL] Renode error: {e}"
         finally:
             try:
