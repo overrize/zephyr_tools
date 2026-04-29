@@ -2,14 +2,41 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
+from rich.table import Table
 from rich import box
 
 console = Console()
+
+_HISTORY_FILE = Path.home() / ".zephyr_sessions" / "workspaces.json"
+_MAX_HISTORY = 8
+
+
+def _load_history() -> list[dict]:
+    if not _HISTORY_FILE.exists():
+        return []
+    try:
+        return json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _save_history(workspaces: list[dict]):
+    _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _HISTORY_FILE.write_text(json.dumps(workspaces, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _record_workspace(path: Path):
+    import time
+    workspaces = _load_history()
+    path_str = str(path.resolve())
+    workspaces = [w for w in workspaces if w["path"] != path_str]
+    workspaces.insert(0, {"path": path_str, "last_used": time.time()})
+    _save_history(workspaces[: _MAX_HISTORY])
 
 
 def detect_workspace(path: Path | None = None) -> Path | None:
@@ -36,25 +63,50 @@ def prompt_workspace() -> Path:
     detected = detect_workspace(cwd)
 
     if detected:
+        _record_workspace(detected)
         console.print(Panel(
             f"[green]Detected Zephyr workspace:[/green] [cyan]{detected}[/cyan]",
             border_style="green",
         ))
         return detected
 
-    console.print(Panel(
-        "[yellow]Not inside a Zephyr workspace.[/yellow]\n"
-        f"[dim]Current directory: {cwd}[/dim]",
-        title="Workspace",
-        border_style="yellow",
-    ))
+    history = _load_history()
+    if history:
+        console.print("[dim]Recent workspaces:[/dim]")
+        t = Table(box=box.SIMPLE, show_header=False)
+        t.add_column("#", width=3, style="cyan")
+        t.add_column("Path", width=50)
+        t.add_column("Last used")
+        for i, ws in enumerate(history[:5]):
+            from datetime import datetime
+            dt = datetime.fromtimestamp(ws["last_used"]).strftime("%m-%d %H:%M")
+            found = " [green]*[/green]" if Path(ws["path"]).exists() else " [red](missing)[/red]"
+            t.add_row(f"{i+1}.", ws["path"] + found, dt)
+        console.print(t)
+        console.print("  [dim]Enter a number to select, or type a path, or press Enter for current dir[/dim]")
+    else:
+        console.print(Panel(
+            "[yellow]Not inside a Zephyr workspace.[/yellow]\n"
+            f"[dim]Current directory: {cwd}[/dim]",
+            title="Workspace",
+            border_style="yellow",
+        ))
     try:
-        answer = input("Enter workspace path (or press Enter to use current directory): ").strip()
+        answer = input("Workspace: ").strip()
+        if answer.isdigit() and 1 <= int(answer) <= len(history):
+            p = Path(history[int(answer) - 1]["path"])
+            if p.exists():
+                _record_workspace(p)
+                return p
+            console.print("[red]Path no longer exists.[/red]")
+            return prompt_workspace()
         if answer:
             p = Path(answer).resolve()
             if p.exists():
+                _record_workspace(p)
                 return p
             console.print("[red]Path does not exist. Using current directory.[/red]")
+        _record_workspace(cwd)
         return cwd
     except (EOFError, KeyboardInterrupt):
         return cwd
