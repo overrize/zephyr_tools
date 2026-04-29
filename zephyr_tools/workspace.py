@@ -71,7 +71,45 @@ def prompt_workspace() -> Path:
         return detected
 
     history = _load_history()
+
     if history:
+        try:
+            from prompt_toolkit.shortcuts import radiolist_dialog
+            from prompt_toolkit.styles import Style as PtStyle
+
+            pt_style = PtStyle.from_dict({
+                "dialog": "bg:#1f222a",
+                "dialog.body": "bg:#1f222a",
+                "dialog.body label": "fg:#e0e0e0",
+                "dialog.body label.selected": "fg:#6cb6ff bold",
+            })
+            choices = []
+            for i, ws in enumerate(history[:7]):
+                from datetime import datetime
+                dt = datetime.fromtimestamp(ws["last_used"]).strftime("%m-%d %H:%M")
+                label = f"{ws['path']}  ({dt})"
+                choices.append((ws["path"], label))
+            choices.append(("__custom__", "[type a new path]"))
+            result = radiolist_dialog(
+                title="Select workspace",
+                text="Click to choose, or select 'type a new path':",
+                values=choices,
+                style=pt_style,
+            ).run()
+            if result and result != "__custom__":
+                p = Path(result).resolve()
+                if p.exists():
+                    _record_workspace(p)
+                    return p
+                console.print("[red]Path no longer exists.[/red]")
+            elif result == "__custom__":
+                pass
+            else:
+                _record_workspace(cwd)
+                return cwd
+        except Exception:
+            pass
+
         console.print("[dim]Recent workspaces:[/dim]")
         t = Table(box=box.SIMPLE, show_header=False)
         t.add_column("#", width=3, style="cyan")
@@ -91,6 +129,7 @@ def prompt_workspace() -> Path:
             title="Workspace",
             border_style="yellow",
         ))
+
     try:
         answer = input("Workspace: ").strip()
         if answer.isdigit() and 1 <= int(answer) <= len(history):

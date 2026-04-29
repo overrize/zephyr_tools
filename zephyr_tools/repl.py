@@ -10,6 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -213,8 +216,11 @@ class ZephyrRepl:
         self.ctx_project: str | None = None
         self.ctx_board: str = default_board
         self.ctx_build_dir: str = "build"
-        self._session: session_store.ZephyrSession | None = None
-        self._resume_id = resume_session_id
+        self.psession = PromptSession(
+            history=FileHistory(str(Path.home() / ".zephyr_history")),
+            mouse_support=True,
+            enable_history_search=True,
+        )
 
     def _prompt(self) -> str:
         ctx = ""
@@ -262,7 +268,7 @@ class ZephyrRepl:
                         elif self.ctx_board:
                             cp = self.ctx_board
                         prompt_str = f"\nzt [{cp}]> " if cp else "\nzt> "
-                    text = input(prompt_str).strip()
+                    text = self.psession.prompt(prompt_str).strip()
                 except (EOFError, KeyboardInterrupt):
                     self._save_and_exit()
                     break
