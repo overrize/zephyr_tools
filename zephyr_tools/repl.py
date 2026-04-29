@@ -216,6 +216,8 @@ class ZephyrRepl:
         self.ctx_project: str | None = None
         self.ctx_board: str = default_board
         self.ctx_build_dir: str = "build"
+        self._session: session_store.ZephyrSession | None = None
+        self._resume_id = resume_session_id
         self.psession = PromptSession(
             history=FileHistory(str(Path.home() / ".zephyr_history")),
             mouse_support=True,
