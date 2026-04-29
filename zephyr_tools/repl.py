@@ -741,10 +741,10 @@ start
             title="Fork",
         ))
         if os.name == "nt":
-            cmd = f'start "Zephyr Tools - {path.name}" cmd /k "zt repl --resume {sid}"'
+            cmd = f'start "Zephyr Tools - {path.name}" cmd /k "cd /d {path} && python -m zephyr_tools repl --resume {sid}"'
             subprocess.Popen(cmd, shell=True)
         else:
-            cmd = ["x-terminal-emulator", "-e", f"zt repl --resume {sid}"]
+            cmd = ["x-terminal-emulator", "-e", "bash", "-c", f"cd {path} && python -m zephyr_tools repl --resume {sid}"]
             subprocess.Popen(cmd)
         console.print("[green]New terminal opened.[/green] [dim]The sub-agent has its own session.[/dim]")
 
