@@ -334,13 +334,14 @@ class ZephyrRepl:
 
     def _process_turn(self):
         try:
-            stream = self.llm.chat.completions.create(
-                model=self.model,
-                messages=self.messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                stream=True,
-            )
+            with console.status("[dim]Thinking...[/dim]", spinner="dots"):
+                stream = self.llm.chat.completions.create(
+                    model=self.model,
+                    messages=self.messages,
+                    tools=TOOL_DEFINITIONS,
+                    tool_choice="auto",
+                    stream=True,
+                )
         except APIError as e:
             console.print(f"[red]API error: {e}[/red]")
             self.messages.pop()
@@ -350,8 +351,11 @@ class ZephyrRepl:
         reasoning_buffer = ""
         tool_calls: dict[int, dict] = {}
         finish_reason = None
+        first_chunk = True
 
         for chunk in stream:
+            if first_chunk and chunk.choices:
+                first_chunk = False
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -362,12 +366,14 @@ class ZephyrRepl:
                 continue
             if delta.content:
                 content_buffer += delta.content
-                print(delta.content, end="", flush=True)
             rc = getattr(delta, "reasoning_content", None)
             if rc is None:
                 rc = delta.model_extra.get("reasoning_content") if hasattr(delta, "model_extra") and delta.model_extra else None
             if rc:
+                if not reasoning_buffer:
+                    console.print("[dim]Thinking...[/dim]") if rc else None
                 reasoning_buffer += rc
+                console.print(f"[dim]{rc}[/dim]", end="", flush=True)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
@@ -387,6 +393,8 @@ class ZephyrRepl:
             if reasoning_buffer:
                 msg["reasoning_content"] = reasoning_buffer
             self.messages.append(msg)
+            print(content_buffer, end="", flush=True) if not tool_calls else console.print(f"  {content_buffer[:200]}...", style="dim")
+            print() if not tool_calls else None
         elif reasoning_buffer and not tool_calls:
             msg = {"role": "assistant", "content": None, "reasoning_content": reasoning_buffer}
             self.messages.append(msg)
@@ -649,13 +657,20 @@ class ZephyrRepl:
             console.print(f"[red]Path not found: {path}[/red]")
             return
         sid = self._session.session_id if self._session else "new"
+        console.print(Panel(
+            f"[yellow]Forking sub-agent[/yellow] for [cyan]{path.name}[/cyan]\n"
+            f"[dim]Session: {sid}[/dim]\n"
+            f"[dim]Path: {path}[/dim]",
+            border_style="yellow",
+            title="Fork",
+        ))
         if os.name == "nt":
             cmd = f'start "Zephyr Tools - {path.name}" cmd /k "zt repl --resume {sid}"'
             subprocess.Popen(cmd, shell=True)
         else:
             cmd = ["x-terminal-emulator", "-e", f"zt repl --resume {sid}"]
             subprocess.Popen(cmd)
-        console.print(f"[green]Forked session[/green] [dim]{sid}[/dim] [dim]at[/dim] [cyan]{path}[/cyan]")
+        console.print("[green]New terminal opened.[/green] [dim]The sub-agent has its own session.[/dim]")
 
     def _show_slash_help(self):
         console.print(Panel(
