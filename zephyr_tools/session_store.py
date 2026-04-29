@@ -58,7 +58,12 @@ def load_session(session_id: str) -> ZephyrSession | None:
     path = _path(session_id)
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
     return ZephyrSession(**data)
 
 
@@ -67,7 +72,12 @@ def list_sessions() -> list[dict]:
         return []
     sessions = []
     for path in sorted(SESSIONS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        data = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict) or "session_id" not in data:
+            continue
         sessions.append({
             "id": data["session_id"],
             "created": data["created_at"],
