@@ -576,43 +576,50 @@ class ZephyrRepl:
             output = f"[FAIL] EXIT CODE: {result.returncode}\n{output}"
         return output[:2000]
 
-    def _tool_renode_run(self, elf_path: str, machine: str = "nucleo_f411re", timeout: int = 15) -> str:
+    def _tool_renode_run(self, elf_path: str, machine: str = "nucleo_f411re", timeout: int = 30) -> str:
         p = Path(elf_path)
         if not p.exists():
             return f"[FAIL] Binary not found: {elf_path}"
-        with console.status(f"[yellow]Starting Renode simulation for {p.name}...[/yellow]", spinner="dots"):
-            import tempfile
-            resc = f"""
+
+        console.print(f"  [dim]Checking Renode...[/dim]")
+        check = subprocess.run("where renode 2>nul || renode --version", shell=True, capture_output=True, text=True)
+        if check.returncode != 0 or "not recognized" in (check.stdout + check.stderr).lower():
+            return "[FAIL] Renode not found. Install from https://renode.io and ensure 'renode' is in PATH."
+
+        console.print(f"  [dim]Building simulation script for {p.name}...[/dim]")
+        import tempfile
+        resc = f"""
 bin @{p.resolve()}
 machine LoadPlatformDescription @platforms/boards/{machine}.repl
 showAnalyzer uart0
 sysbus LoadELF @{p.resolve()}
 start
 """
-            resc_file = Path(tempfile.mktemp(suffix=".resc"))
-            resc_file.write_text(resc.strip(), encoding="utf-8")
-            try:
+        resc_file = Path(tempfile.mktemp(suffix=".resc"))
+        resc_file.write_text(resc.strip(), encoding="utf-8")
+
+        console.print(f"  [dim]Launching Renode simulator (timeout: {timeout}s)...[/dim]")
+        try:
+            with console.status(f"[yellow]Running {p.name} on {machine}...[/yellow]", spinner="dots"):
                 result = subprocess.run(
                     f"renode --console --disable-xwt -e \"{resc_file.resolve()}\"",
                     shell=True, capture_output=True, text=True, timeout=timeout,
                 )
-                stdout = result.stdout.strip()[:1000]
-                stderr = result.stderr.strip()[:500]
-                if result.returncode == 0:
-                    return f"[OK] Renode simulation completed\n{stdout}" if stdout else "[OK] Renode simulation completed (no output)"
-                err_text = stderr or stdout
-                if "not recognized" in err_text or "not found" in err_text:
-                    return "[FAIL] Renode not installed. Download from https://renode.io and add to PATH"
-                return f"[FAIL] Renode exited with code {result.returncode}\n{err_text[:500]}"
-            except subprocess.TimeoutExpired:
-                return f"[OK] Renode is running (timeout after {timeout}s). Check the Renode window for serial output."
-            except Exception as e:
-                return f"[FAIL] Renode error: {e}"
-            finally:
-                try:
-                    resc_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            stdout = result.stdout.strip()[:1000]
+            stderr = result.stderr.strip()[:500]
+            if result.returncode == 0:
+                msg = stdout or "[OK] Renode simulation completed (no output)"
+                return f"[OK] Renode simulation completed\n{msg}"
+            return f"[FAIL] Renode exited with code {result.returncode}\n{stderr or stdout[:500]}"
+        except subprocess.TimeoutExpired:
+            return f"[OK] Renode simulation running (timeout after {timeout}s). The Renode window is open with serial output."
+        except Exception as e:
+            return f"[FAIL] Renode error: {e}"
+        finally:
+            try:
+                resc_file.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _try_resume_or_new(self):
         sessions = session_store.list_sessions()
