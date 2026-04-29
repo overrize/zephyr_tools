@@ -351,11 +351,8 @@ class ZephyrRepl:
         reasoning_buffer = ""
         tool_calls: dict[int, dict] = {}
         finish_reason = None
-        first_chunk = True
 
         for chunk in stream:
-            if first_chunk and chunk.choices:
-                first_chunk = False
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -370,10 +367,7 @@ class ZephyrRepl:
             if rc is None:
                 rc = delta.model_extra.get("reasoning_content") if hasattr(delta, "model_extra") and delta.model_extra else None
             if rc:
-                if not reasoning_buffer:
-                    console.print("[dim]Thinking...[/dim]") if rc else None
                 reasoning_buffer += rc
-                console.print(f"[dim]{rc}[/dim]", end="", flush=True)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
@@ -386,18 +380,14 @@ class ZephyrRepl:
                             tool_calls[idx]["function"]["name"] += tc.function.name
                         if tc.function.arguments:
                             tool_calls[idx]["function"]["arguments"] += tc.function.arguments
-        print()
 
         if content_buffer:
             msg: dict = {"role": "assistant", "content": content_buffer}
             if reasoning_buffer:
                 msg["reasoning_content"] = reasoning_buffer
             self.messages.append(msg)
-            print(content_buffer, end="", flush=True) if not tool_calls else console.print(f"  {content_buffer[:200]}...", style="dim")
-            print() if not tool_calls else None
-        elif reasoning_buffer and not tool_calls:
-            msg = {"role": "assistant", "content": None, "reasoning_content": reasoning_buffer}
-            self.messages.append(msg)
+            if finish_reason != "tool_calls":
+                console.print(content_buffer)
 
         if finish_reason == "tool_calls" and tool_calls:
             for tc in tool_calls.values():
