@@ -47,3 +47,6 @@ apps/desktop/.tauri/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test / generated projects
+testspace/
