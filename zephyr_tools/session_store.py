@@ -49,7 +49,7 @@ def save_session(session: ZephyrSession) -> Path:
     session.updated_at = time.time()
     session.message_count = len(session.messages)
     path = _path(session.session_id)
-    path.write_text(json.dumps(asdict(session), indent=2, ensure_ascii=False))
+    path.write_text(json.dumps(asdict(session), indent=2, ensure_ascii=False), encoding="utf-8")
     _cleanup_old()
     return path
 
@@ -58,7 +58,7 @@ def load_session(session_id: str) -> ZephyrSession | None:
     path = _path(session_id)
     if not path.exists():
         return None
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return ZephyrSession(**data)
 
 
@@ -67,7 +67,7 @@ def list_sessions() -> list[dict]:
         return []
     sessions = []
     for path in sorted(SESSIONS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         sessions.append({
             "id": data["session_id"],
             "created": data["created_at"],

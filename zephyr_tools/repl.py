@@ -254,12 +254,12 @@ class ZephyrRepl:
                         prompt_str = "zt" + (f" [{Path(self.ctx_project).name}]" if self.ctx_project else "")
                         prompt_str += "> "
                     else:
-                        ctx = ""
+                        cp = ""
                         if self.ctx_project:
-                            ctx = Path(self.ctx_project).name
+                            cp = Path(self.ctx_project).name
                         elif self.ctx_board:
-                            ctx = self.ctx_board
-                        prompt_str = f"zt [dim]{ctx}[/dim]> " if ctx else "zt> "
+                            cp = self.ctx_board
+                        prompt_str = f"\nzt [{cp}]> " if cp else "\nzt> "
                     text = input(prompt_str).strip()
                 except (EOFError, KeyboardInterrupt):
                     self._save_and_exit()
